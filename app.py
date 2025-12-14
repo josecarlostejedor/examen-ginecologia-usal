@@ -4,412 +4,310 @@ from pypdf import PdfReader
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 import json
 import io
 import random
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="Generador Exámenes Medicina - Ginecología", layout="wide")
+# --- CONFIGURACIÓN INICIAL ---
+st.set_page_config(page_title="Generador Exámenes Ginecología", layout="wide")
 
-# --- ESTILOS CSS PERSONALIZADOS ---
 st.markdown("""
     <style>
-    .stExpander { border: 1px solid #ddd; border-radius: 5px; }
-    .block-container { padding-top: 2rem; }
+    .stTextArea textarea { font-size: 16px !important; }
+    .status-ok { color: green; font-weight: bold; }
+    .status-err { color: red; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- GESTIÓN DEL ESTADO (SESSION STATE) ---
-if 'questions_db' not in st.session_state:
-    st.session_state['questions_db'] = {} 
+# --- ESTADO DE LA SESIÓN (MEMORIA) ---
 if 'files_content' not in st.session_state:
-    st.session_state['files_content'] = {}
+    st.session_state['files_content'] = {} # Texto extraído de los PDFs
+if 'files_processed_names' not in st.session_state:
+    st.session_state['files_processed_names'] = []
+if 'questions_db' not in st.session_state:
+    st.session_state['questions_db'] = {} # Preguntas generadas y revisadas
 
-# --- FUNCIONES AUXILIARES ---
+# --- FUNCIONES DE LÓGICA ---
 
-def extract_text_from_pdf(file):
+def extract_text_robust(file):
+    """Extrae texto de PDF o PDF-PPT evitando bloqueos"""
     try:
         reader = PdfReader(file)
         text = ""
         for page in reader.pages:
-            text += page.extract_text() or ""
-        return text
+            t = page.extract_text()
+            if t: text += t + "\n"
+        
+        # Validación de contenido mínimo
+        if len(text.strip()) < 50:
+            return None, "⚠️ PDF sin texto reconocible (posiblemente imágenes)"
+        return text, "OK"
     except Exception as e:
-        st.error(f"Error leyendo {file.name}: {e}")
-        return ""
+        return None, f"❌ Error: {str(e)}"
 
-def create_word_header(doc, is_exam=False):
-    # Simulación de cabecera institucional
-    header_table = doc.add_table(rows=1, cols=2)
-    header_table.autofit = False
-    header_table.columns[0].width = Inches(4)
-    header_table.columns[1].width = Inches(2.5)
-    
-    c1 = header_table.cell(0, 0)
-    p1 = c1.paragraphs[0]
-    r1 = p1.add_run("VNIVERSIDAD\nD SALAMANCA\n")
-    r1.bold = True
-    r1.font.size = Pt(14)
-    p1.add_run("CAMPUS DE EXCELENCIA INTERNACIONAL").font.size = Pt(7)
-    
-    c2 = header_table.cell(0, 1)
-    p2 = c2.paragraphs[0]
-    p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    r2 = p2.add_run("FACULTAD DE MEDICINA\n")
-    r2.bold = True
-    r2.font.size = Pt(11)
-    p2.add_run("DEPARTAMENTO DE OBSTETRICIA Y GINECOLOGÍA").font.size = Pt(9)
-    
-    doc.add_paragraph("") # Espacio
-
-    if is_exam:
-        # Datos del alumno
-        p_info = doc.add_paragraph()
-        p_info.add_run("CURSO _3º____\n").bold = True
-        p_info.add_run("APELLIDOS _________________________________________________________________________\n")
-        p_info.add_run("NOMBRE __________________________________________ DNI _______________________")
-        
-        doc.add_paragraph("") # Espacio
-        
-        # Título Examen
-        tit = doc.add_heading("Ginecología", 0)
-        tit.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Cuadro de instrucciones
-        table_instr = doc.add_table(rows=1, cols=1)
-        table_instr.style = 'Table Grid'
-        cell_instr = table_instr.cell(0, 0)
-        p_instr = cell_instr.paragraphs[0]
-        text_instr = (
-            "Lea atentamente cada cuestión antes de responder.\n"
-            "Dispone de 50 minutos para responder a 40 preguntas tipo test "
-            "con 4 opciones, de las que sólo una es verdadera.\n"
-            "Cada pregunta correcta suma 1 punto. Las respuestas incorrectas "
-            "restan 0.25 puntos. Las preguntas no contestadas no suman ni "
-            "restan puntuación.\n"
-            "Para aprobar el examen será necesario obtener como mínimo una "
-            "puntuación final de 5 puntos.\n"
-            "La valoración final en las calificaciones será sobre 10 puntos."
-        )
-        p_instr.add_run(text_instr).font.size = Pt(10)
-        doc.add_paragraph("")
-
-def generate_questions_llm(api_key, text_content, num_a, num_b, num_c, topic_name):
+def call_openai_generator(api_key, text, na, nb, nc, topic):
+    """Llama a GPT-4o para crear las preguntas"""
     client = openai.OpenAI(api_key=api_key)
     
-    prompt_system = """
-    Eres un profesor universitario experto en Obstetricia y Ginecología (estilo Profesor Alcázar) para 4º de Medicina.
-    Tu tarea es generar preguntas de examen tipo test rigurosas.
-    Formato de salida OBLIGATORIO: JSON array.
-    Estructura de cada objeto JSON:
+    system_prompt = """
+    Actúa como Catedrático de Obstetricia y Ginecología (estilo Profesor Alcázar).
+    Analiza el texto proporcionado (que puede venir de DIAPOSITIVAS esquemáticas) y genera preguntas de examen.
+    
+    IMPORTANTE: Devuelve SOLO un JSON válido con esta estructura:
     {
-        "type": "A/B/C",
-        "question": "Enunciado...",
-        "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-        "answer_index": 0 (0 para A, 1 para B, 2 para C, 3 para D),
-        "justification": "Explicación..."
+        "questions": [
+            {
+                "type": "A (Directa) / B (Integrada) / C (Caso Clínico)",
+                "question": "Enunciado completo...",
+                "options": ["Opción A", "Opción B", "Opción C", "Opción D"],
+                "answer_index": 0,
+                "justification": "Explicación breve..."
+            }
+        ]
     }
     """
     
-    prompt_user = f"""
-    Del siguiente texto sobre el tema '{topic_name}', genera exactamente:
-    - {num_a} preguntas Tipo A (Conocimiento Directo).
-    - {num_b} preguntas Tipo B (Conocimiento Integrado).
-    - {num_c} preguntas Tipo C (Caso Clínico detallado).
-
-    Texto base: {text_content[:20000]}...
+    user_prompt = f"""
+    Tema: {topic}.
+    Genera exactamente:
+    - {na} preguntas Tipo A (Memorísticas/Definiciones).
+    - {nb} preguntas Tipo B (Relación conceptos/Fisiopatología).
+    - {nc} preguntas Tipo C (Casos Clínicos con edad, antecedentes y datos concretos).
     
-    Asegúrate de:
-    1. Que solo haya una respuesta correcta.
-    2. Usar terminología médica precisa en español.
-    3. Tipo C: Incluir datos clínicos realistas (IMC, paridad, eco).
-    4. Distractores plausibles.
+    TEXTO BASE:
+    {text[:25000]}...
     """
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user}
-            ],
+            model="gpt-4o",
+            messages=[{"role": "system", "content": system_prompt}, 
+                      {"role": "user", "content": user_prompt}],
             response_format={"type": "json_object"},
             temperature=0.7
         )
-        content = response.choices[0].message.content
-        data = json.loads(content)
-        if "questions" in data:
-            return data["questions"]
-        return data 
-        
+        data = json.loads(response.choices[0].message.content)
+        return data.get("questions", [])
     except Exception as e:
-        # En caso de error, devolvemos lista vacía y avisamos en UI
+        st.error(f"Error OpenAI: {e}")
         return []
 
-# --- INTERFAZ SIDEBAR ---
+def create_exam_docx(questions):
+    """Genera el Word final con formato oficial"""
+    doc = Document()
+    
+    # Cabecera
+    table = doc.add_table(1, 2)
+    table.autofit = False
+    table.columns[0].width = Inches(4)
+    table.columns[1].width = Inches(2.5)
+    
+    c1 = table.cell(0, 0).paragraphs[0]
+    c1.add_run("VNIVERSIDAD\nD SALAMANCA\n").bold = True
+    c1.runs[0].font.size = Pt(14)
+    c1.add_run("CAMPUS DE EXCELENCIA INTERNACIONAL").font.size = Pt(7)
+    
+    c2 = table.cell(0, 1).paragraphs[0]
+    c2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    c2.add_run("FACULTAD DE MEDICINA\nDEPARTAMENTO DE OBSTETRICIA Y GINECOLOGÍA").bold = True
+    c2.runs[0].font.size = Pt(9)
+    
+    doc.add_paragraph()
+    
+    # Datos alumno
+    p = doc.add_paragraph()
+    p.add_run("CURSO 3º ______ APELLIDOS ___________________________________ NOMBRE ______________________ DNI ___________").font.size = Pt(10)
+    
+    # Instrucciones
+    doc.add_heading("EXAMEN DE GINECOLOGÍA", 0).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    instr_table = doc.add_table(1, 1)
+    instr_table.style = 'Table Grid'
+    msg = ("Lea atentamente. 50 minutos. 40 preguntas. "
+           "Acierto: +1. Fallo: -0.25. Blanco: 0. Aprobar: 5/10.")
+    instr_table.cell(0,0).text = msg
+    
+    doc.add_paragraph()
+    
+    # Preguntas
+    for i, q in enumerate(questions):
+        p = doc.add_paragraph()
+        p.add_run(f"{i+1}. {q['question']}").bold = True
+        letters = ["a)", "b)", "c)", "d)"]
+        for j, opt in enumerate(q['options']):
+            clean_opt = opt.replace("a) ", "").replace("b) ", "").replace("c) ", "").replace("d) ", "")
+            doc.add_paragraph(f"{letters[j]} {clean_opt}")
+        doc.add_paragraph()
+        
+    return doc
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/6/62/Escudo_de_la_Universidad_de_Salamanca.svg/1200px-Escudo_de_la_Universidad_de_Salamanca.svg.png", width=100)
-    st.title("Generador Exámenes Medicina")
-    st.markdown("**Obstetricia y Ginecología**")
-    api_key = st.text_input("OpenAI API Key", type="password")
-    st.info("Introduce tu clave para empezar.")
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/6/62/Escudo_de_la_Universidad_de_Salamanca.svg/1200px-Escudo_de_la_Universidad_de_Salamanca.svg.png", width=80)
+    st.title("Generador USAL")
+    api_key = st.text_input("Clave API OpenAI", type="password")
 
-# --- TABS PRINCIPALES ---
-tab1, tab2, tab3 = st.tabs(["📂 Subir Temas (Max 35)", "✏️ Editar Preguntas", "🎓 Generar Examen Final"])
+# --- PESTAÑAS (FLUJO DE TRABAJO) ---
+tab_upload, tab_review, tab_exam = st.tabs([
+    "1️⃣ Subir Archivos", 
+    "2️⃣ Generar y Editar Preguntas", 
+    "3️⃣ Crear Examen Final"
+])
 
-# --- TAB 1: SUBIDA Y GENERACIÓN ---
-with tab1:
-    st.header("1. Carga de Material Docente")
-    st.markdown("Puedes subir hasta **35 archivos PDF** simultáneamente.")
+# --- TAB 1: SUBIDA ---
+with tab_upload:
+    st.header("Paso 1: Carga de Material")
+    uploaded = st.file_uploader("Sube PDFs o PPTs exportados a PDF (Max 35)", type="pdf", accept_multiple_files=True)
     
-    uploaded_files = st.file_uploader(
-        "Arrastra tus archivos aquí", 
-        type="pdf", 
-        accept_multiple_files=True
-    )
+    if uploaded:
+        # Detectar nuevos
+        new_files = [f for f in uploaded if f.name not in st.session_state['files_processed_names']]
+        
+        if new_files:
+            st.info("⏳ Procesando texto de los nuevos archivos...")
+            bar = st.progress(0)
+            for i, f in enumerate(new_files):
+                text, status = extract_text_robust(f)
+                if text:
+                    st.session_state['files_content'][f.name] = text
+                    st.session_state['files_processed_names'].append(f.name)
+                else:
+                    st.error(f"Error en {f.name}: {status}")
+                bar.progress((i+1)/len(new_files))
+            st.success("Procesamiento completado.")
+            st.rerun()
+            
+    # Mostrar resumen
+    validos = list(st.session_state['files_content'].keys())
+    if validos:
+        st.success(f"✅ {len(validos)} temas listos para generar preguntas.")
+        with st.expander("Ver lista de temas cargados"):
+            st.write(validos)
+
+# --- TAB 2: GENERAR Y EDITAR (EL CORAZÓN DE LA APP) ---
+with tab_review:
+    st.header("Paso 2: Generación y Revisión por Tema")
     
-    # Validación de cantidad de archivos
-    if uploaded_files:
-        if len(uploaded_files) > 35:
-            st.error(f"⚠️ Has subido {len(uploaded_files)} archivos. El límite máximo es 35. Por favor elimina algunos.")
-        else:
-            st.success(f"✅ {len(uploaded_files)} temas cargados correctamente.")
+    temas_list = list(st.session_state['files_content'].keys())
+    
+    if not temas_list:
+        st.warning("Primero sube archivos en la pestaña 1.")
+    else:
+        # Selector de tema
+        tema_actual = st.selectbox("Selecciona el tema para trabajar:", temas_list)
+        
+        if tema_actual:
             st.divider()
             
-            # --- CONFIGURACIÓN MASIVA (NUEVO) ---
-            st.subheader("⚙️ Configuración de Preguntas")
-            col_m1, col_m2, col_m3, col_m4 = st.columns([1,1,1,2])
-            with col_m1:
-                def_a = st.number_input("Tipo A (Defecto)", 0, 10, 2)
-            with col_m2:
-                def_b = st.number_input("Tipo B (Defecto)", 0, 10, 2)
-            with col_m3:
-                def_c = st.number_input("Tipo C (Defecto)", 0, 10, 1)
-            with col_m4:
-                st.write("") 
-                st.write("") 
-                apply_all = st.checkbox("Aplicar estos valores a TODOS los temas", value=True)
-
-            st.write("---")
-
-            # Procesar textos
-            configs = {}
-            # Contenedor con scroll para evitar página infinita si hay 35 temas
-            with st.container(height=500):
-                for uploaded_file in uploaded_files:
-                    # Leer PDF si es nuevo
-                    if uploaded_file.name not in st.session_state['files_content']:
-                        with st.spinner(f"Indexando {uploaded_file.name}..."):
-                            st.session_state['files_content'][uploaded_file.name] = extract_text_from_pdf(uploaded_file)
-                    
-                    # Interfaz de configuración individual
-                    if apply_all:
-                        configs[uploaded_file.name] = (def_a, def_b, def_c)
-                        st.text(f"📄 {uploaded_file.name}: A={def_a}, B={def_b}, C={def_c} (Auto)")
-                    else:
-                        with st.expander(f"Configurar: {uploaded_file.name}", expanded=False):
-                            c1, c2, c3 = st.columns(3)
-                            na = c1.number_input(f"Tipo A - {uploaded_file.name}", min_value=0, value=def_a)
-                            nb = c2.number_input(f"Tipo B - {uploaded_file.name}", min_value=0, value=def_b)
-                            nc = c3.number_input(f"Tipo C - {uploaded_file.name}", min_value=0, value=def_c)
-                            configs[uploaded_file.name] = (na, nb, nc)
-
-            st.write("---")
-            if st.button("🚀 Generar Preguntas con IA", type="primary"):
+            # --- ZONA DE CONFIGURACIÓN ---
+            col1, col2, col3, col4 = st.columns([1,1,1,2])
+            na = col1.number_input("Tipo A", 0, 10, 2)
+            nb = col2.number_input("Tipo B", 0, 10, 2)
+            nc = col3.number_input("Tipo C", 0, 10, 1)
+            
+            # Botón Generar
+            btn_generate = col4.button(f"✨ Generar Preguntas para: {tema_actual}", type="primary")
+            
+            if btn_generate:
                 if not api_key:
                     st.error("Falta la API Key.")
                 else:
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    total_files = len(uploaded_files)
-                    
-                    for idx, file in enumerate(uploaded_files):
-                        fname = file.name
-                        na, nb, nc = configs[fname]
-                        
-                        if (na + nb + nc) > 0:
-                            status_text.text(f"Analizando tema {idx+1}/{total_files}: {fname}...")
-                            text = st.session_state['files_content'][fname]
-                            # Llamada a IA
-                            qs = generate_questions_llm(api_key, text, na, nb, nc, fname)
-                            if qs:
-                                st.session_state['questions_db'][fname] = qs
-                            else:
-                                st.warning(f"No se pudieron generar preguntas para {fname} (posible error API o PDF vacío).")
-                        
-                        progress_bar.progress((idx + 1) / total_files)
-                    
-                    status_text.text("¡Proceso completado!")
-                    st.balloons()
-                    st.success("Preguntas generadas. Pasa a la pestaña 'Editar Preguntas'.")
-
-# --- TAB 2: EDICIÓN ---
-with tab2:
-    st.header("2. Editor de Banco de Preguntas")
-    
-    if not st.session_state['questions_db']:
-        st.info("Aún no hay preguntas. Sube temas en la pestaña anterior.")
-    else:
-        # Selector de tema
-        temas_disponibles = list(st.session_state['questions_db'].keys())
-        tema_sel = st.selectbox("Selecciona Tema a Editar:", temas_disponibles)
-        
-        if tema_sel:
-            q_list = st.session_state['questions_db'][tema_sel]
-            st.write(f"Total preguntas en este tema: {len(q_list)}")
+                    with st.spinner("La IA está leyendo las diapositivas y creando preguntas..."):
+                        text_src = st.session_state['files_content'][tema_actual]
+                        qs = call_openai_generator(api_key, text_src, na, nb, nc, tema_actual)
+                        if qs:
+                            st.session_state['questions_db'][tema_actual] = qs
+                            st.success(f"¡Se han generado {len(qs)} preguntas! Revísalas abajo 👇")
+                        else:
+                            st.error("Error generando preguntas. Inténtalo de nuevo.")
             
-            # Botón descarga individual
-            doc_single = Document()
-            create_word_header(doc_single)
-            doc_single.add_heading(f"Banco: {tema_sel}", 1)
-            
-            for i, q in enumerate(q_list):
-                with st.expander(f"P{i+1} ({q['type']}): {q['question'][:80]}..."):
-                    with st.form(f"edit_{tema_sel}_{i}"):
-                        new_q = st.text_area("Enunciado", q['question'])
-                        c1, c2 = st.columns(2)
+            # --- ZONA DE EDICIÓN (VISIBLE SI HAY PREGUNTAS) ---
+            if tema_actual in st.session_state['questions_db']:
+                qs_editor = st.session_state['questions_db'][tema_actual]
+                
+                st.subheader(f"📝 Revisión: {tema_actual}")
+                st.info("Edita aquí cualquier error. Dale a 'Guardar Correcciones' al final para confirmar los cambios.")
+                
+                # Formulario para editar todo el bloque del tema
+                with st.form(key=f"form_{tema_actual}"):
+                    updated_qs = []
+                    
+                    for i, q in enumerate(qs_editor):
+                        st.markdown(f"**Pregunta {i+1} ({q.get('type','?')})**")
+                        
+                        # Enunciado
+                        new_q_text = st.text_area("Enunciado:", value=q['question'], key=f"q_{tema_actual}_{i}", height=70)
+                        
+                        # Opciones
+                        c_opt1, c_opt2 = st.columns(2)
                         opts = q['options']
-                        # Asegurar 4 opciones
-                        while len(opts) < 4: opts.append("")
+                        while len(opts) < 4: opts.append("...") # Relleno seguridad
                         
-                        o0 = c1.text_input("A)", opts[0])
-                        o1 = c2.text_input("B)", opts[1])
-                        o2 = c1.text_input("C)", opts[2])
-                        o3 = c2.text_input("D)", opts[3])
+                        o0 = c_opt1.text_input("A)", value=opts[0], key=f"o0_{tema_actual}_{i}")
+                        o1 = c_opt2.text_input("B)", value=opts[1], key=f"o1_{tema_actual}_{i}")
+                        o2 = c_opt1.text_input("C)", value=opts[2], key=f"o2_{tema_actual}_{i}")
+                        o3 = c_opt2.text_input("D)", value=opts[3], key=f"o3_{tema_actual}_{i}")
                         
-                        ans_idx = st.selectbox("Correcta", [0,1,2,3], index=q['answer_index'], 
-                                             format_func=lambda x: ["A","B","C","D"][x])
-                        just = st.text_area("Justificación", q.get('justification',''))
+                        # Respuesta
+                        idx_ans = st.selectbox("Correcta:", [0,1,2,3], index=q['answer_index'], 
+                                               format_func=lambda x: "ABCD"[x], key=f"ans_{tema_actual}_{i}")
                         
-                        if st.form_submit_button("Guardar Cambios"):
-                            st.session_state['questions_db'][tema_sel][i].update({
-                                'question': new_q,
-                                'options': [o0, o1, o2, o3],
-                                'answer_index': ans_idx,
-                                'justification': just
-                            })
-                            st.success("Guardado")
-                            st.rerun()
+                        st.markdown("---")
+                        
+                        # Reconstruir objeto
+                        updated_qs.append({
+                            "type": q.get('type', 'General'),
+                            "question": new_q_text,
+                            "options": [o0, o1, o2, o3],
+                            "answer_index": idx_ans,
+                            "justification": q.get('justification', '')
+                        })
+                    
+                    # Botón de Guardado (Refrescar)
+                    if st.form_submit_button("💾 Guardar Correcciones de este Tema"):
+                        st.session_state['questions_db'][tema_actual] = updated_qs
+                        st.success("✅ ¡Cambios guardados! Ya puedes pasar al siguiente tema o crear el examen.")
+            else:
+                st.info("Aún no hay preguntas generadas para este tema. Pulsa el botón de arriba.")
 
-                # Añadir al word temporal
-                p = doc_single.add_paragraph()
-                p.add_run(f"{i+1}. {q['question']}").bold = True
-                for op in q['options']: doc_single.add_paragraph(op, style='List Bullet')
-                doc_single.add_paragraph(f"R: {['A','B','C','D'][q['answer_index']]}. {q.get('justification','')}")
-            
-            bio = io.BytesIO()
-            doc_single.save(bio)
-            st.download_button(f"📥 Descargar DOCX ({tema_sel})", bio.getvalue(), f"{tema_sel}.docx")
-
-# --- TAB 3: GENERADOR EXAMEN ---
-with tab3:
-    st.header("3. Componer Examen Final (40 Preguntas)")
+# --- TAB 3: EXAMEN FINAL ---
+with tab_exam:
+    st.header("Paso 3: Composición del Examen Final")
     
-    total_q_db = sum(len(v) for v in st.session_state['questions_db'].values())
+    total_preguntas = sum(len(qs) for qs in st.session_state['questions_db'].values())
+    temas_con_preguntas = list(st.session_state['questions_db'].keys())
     
-    if total_q_db == 0:
-        st.warning("No hay preguntas en la base de datos.")
+    if total_preguntas == 0:
+        st.warning("Aún no has generado ni guardado ninguna pregunta. Ve a la Pestaña 2.")
     else:
-        st.write(f"Tienes **{total_q_db}** preguntas disponibles en total entre todos los temas.")
+        st.write(f"Tienes un banco de **{total_preguntas} preguntas** revisadas de **{len(temas_con_preguntas)} temas**.")
         
-        # Modo de selección
-        mode = st.radio("Método de selección:", ["Manual (Tema por tema)", "Automático (Reparto equitativo)"])
+        target = st.number_input("Número de preguntas en el examen final:", value=40)
         
-        exam_selection = {}
-        count_sel = 0
-        
-        if mode == "Manual (Tema por tema)":
-            cols = st.columns(3)
-            idx = 0
-            for tema, qs in st.session_state['questions_db'].items():
-                with cols[idx % 3]:
-                    n = st.number_input(f"{tema} (Disp: {len(qs)})", 0, len(qs), 0)
-                    exam_selection[tema] = n
-                    count_sel += n
-                idx += 1
-        else:
-            # Automático
-            if st.button("Distribuir 40 preguntas automáticamente"):
-                temas = list(st.session_state['questions_db'].keys())
-                n_temas = len(temas)
-                base = 40 // n_temas
-                remainder = 40 % n_temas
-                
-                for i, tema in enumerate(temas):
-                    disponibles = len(st.session_state['questions_db'][tema])
-                    to_take = base + (1 if i < remainder else 0)
-                    # No pedir más de las que hay
-                    real_take = min(to_take, disponibles)
-                    exam_selection[tema] = real_take
-                    
-                # Guardar en session state para persistencia visual si fuera necesario, 
-                # pero aquí lo procesamos directo para generar
-                count_sel = sum(exam_selection.values())
-                if count_sel < 40:
-                    st.warning(f"Solo hay {count_sel} preguntas disponibles en total (se necesitaban 40).")
-                else:
-                    st.success(f"Reparto calculado: {count_sel} preguntas.")
-
-        st.metric("Total Preguntas Examen", f"{count_sel} / 40")
-        
-        if count_sel != 40:
-            st.error("El examen debe tener exactamente 40 preguntas.")
-        else:
-            if st.button("📄 GENERAR EXAMEN FINAL"):
-                doc_final = Document()
-                create_word_header(doc_final, is_exam=True)
-                
-                final_pool = []
-                for tema, num in exam_selection.items():
-                    if num > 0:
-                        # Selección aleatoria de preguntas del tema
-                        pool = st.session_state['questions_db'][tema]
-                        selected = random.sample(pool, num)
-                        final_pool.extend(selected)
-                
-                # Mezclar todo el examen
-                random.shuffle(final_pool)
-                
-                # Escribir preguntas
-                for i, q in enumerate(final_pool):
-                    p = doc_final.add_paragraph()
-                    p.add_run(f"{i+1}. {q['question']}").bold = True
-                    
-                    letters = ['a)', 'b)', 'c)', 'd)']
-                    for j, opt in enumerate(q['options']):
-                        clean_opt = opt.split(') ', 1)[-1] if ')' in opt[:4] else opt
-                        doc_final.add_paragraph(f"{letters[j]} {clean_opt}")
-                    
-                    doc_final.add_paragraph("")
-                
-                # Hoja respuestas
-                doc_final.add_page_break()
-                doc_final.add_heading("PLANTILLA DE CORRECCIÓN", 1)
-                table = doc_final.add_table(rows=1, cols=4)
-                table.style = 'Table Grid'
-                hdr = table.rows[0].cells
-                hdr[0].text = "Nº"
-                hdr[1].text = "Respuesta"
-                hdr[2].text = "Nº"
-                hdr[3].text = "Respuesta"
-                
-                # Llenar tabla en 2 columnas
-                mitad = 20
-                for i in range(mitad):
-                    row = table.add_row().cells
-                    # Col 1
-                    q1 = final_pool[i]
-                    row[0].text = str(i+1)
-                    row[1].text = ['a','b','c','d'][q1['answer_index']]
-                    
-                    # Col 2
-                    if i + mitad < 40:
-                        q2 = final_pool[i+mitad]
-                        row[2].text = str(i+mitad+1)
-                        row[3].text = ['a','b','c','d'][q2['answer_index']]
-
-                bio_fin = io.BytesIO()
-                doc_final.save(bio_fin)
-                st.download_button("⬇️ Descargar Examen (.docx)", bio_fin.getvalue(), "Examen_Final_USAL.docx")
+        if st.button("📄 Generar Examen Final (.docx)"):
+            # Lógica de selección: Reparto proporcional simple
+            final_pool = []
+            
+            # Juntamos todas
+            all_qs = []
+            for t in temas_con_preguntas:
+                all_qs.extend(st.session_state['questions_db'][t])
+            
+            if len(all_qs) < target:
+                st.warning(f"Solo tienes {len(all_qs)} preguntas disponibles. Se usarán todas.")
+                final_pool = all_qs
+            else:
+                final_pool = random.sample(all_qs, target)
+            
+            # Crear documento
+            doc = create_exam_docx(final_pool)
+            bio = io.BytesIO()
+            doc.save(bio)
+            
+            st.balloons()
+            st.download_button(
+                label="⬇️ Descargar Examen Oficial",
+                data=bio.getvalue(),
+                file_name="Examen_Ginecologia_Final.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
