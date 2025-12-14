@@ -7,9 +7,10 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 import json
 import io
 import random
+from PIL import Image
 
 # --- CONFIGURACIÓN INICIAL ---
-st.set_page_config(page_title="Generador Exámenes Ginecología - Nivel Clínico", layout="wide")
+st.set_page_config(page_title="Generador Exámenes Ginecología - Nivel Clínico + Imágenes", layout="wide")
 
 st.markdown("""
     <style>
@@ -20,12 +21,18 @@ st.markdown("""
         font-size: 16px;
         font-weight: bold;
     }
+    img {
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 5px;
+        max-width: 100%;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # --- ESTADO DE LA SESIÓN ---
-if 'files_content' not in st.session_state:
-    st.session_state['files_content'] = {}
+if 'files_data' not in st.session_state:
+    st.session_state['files_data'] = {} # Estructura: {'nombre': {'text': '...', 'images': [img_bytes]}}
 if 'files_processed_names' not in st.session_state:
     st.session_state['files_processed_names'] = []
 if 'questions_db' not in st.session_state:
@@ -33,26 +40,37 @@ if 'questions_db' not in st.session_state:
 
 # --- FUNCIONES DE LÓGICA ---
 
-def extract_text_robust(file):
-    """Extrae texto de PDF o PDF-PPT evitando bloqueos"""
+def extract_content_robust(file):
+    """Extrae Texto e IMÁGENES de PDF/PPT"""
     try:
         reader = PdfReader(file)
         text = ""
+        extracted_images = []
+        
         for page in reader.pages:
+            # 1. Extraer Texto
             t = page.extract_text()
             if t: text += t + "\n"
+            
+            # 2. Extraer Imágenes
+            try:
+                for img_file_obj in page.images:
+                    extracted_images.append(img_file_obj.data)
+            except:
+                pass # Si falla una imagen, continuamos
         
+        # Validación
         if len(text.strip()) < 50:
-            return None, "⚠️ PDF sin texto reconocible (posiblemente imágenes)"
-        return text, "OK"
+            return None, [], "⚠️ PDF sin texto reconocible (posiblemente imágenes)"
+            
+        return text, extracted_images, "OK"
     except Exception as e:
-        return None, f"❌ Error: {str(e)}"
+        return None, [], f"❌ Error: {str(e)}"
 
 def call_openai_generator(api_key, text, na, nb, nc, topic):
     """Llama a GPT-4o con un PROMPT AVANZADO MÉDICO"""
     client = openai.OpenAI(api_key=api_key)
     
-    # --- AQUÍ ESTÁ LA MAGIA DEL PROMPT MÉDICO ---
     system_prompt = """
     Eres un Catedrático de Obstetricia y Ginecología con experiencia clínica hospitalaria. 
     Tu objetivo es crear preguntas de examen para alumnos de 4º de Medicina.
@@ -60,30 +78,30 @@ def call_openai_generator(api_key, text, na, nb, nc, topic):
     INSTRUCCIONES ESPECÍFICAS POR TIPO:
     
     1. TIPO A (Conocimiento Directo): Definiciones, clasificaciones o datos epidemiológicos.
-    2. TIPO B (Integrado): Fisiopatología, relación entre farmacología y clínica, etc.
+    2. TIPO B (Integrado): Fisiopatología, relación entre farmacología y clínica.
     
-    3. TIPO C (CASOS CLÍNICOS - MUY IMPORTANTE):
-       Debes redactar "Viñetas Clínicas" completas y realistas.
-       NO hagas preguntas simples como "¿Qué tiene la paciente?".
+    3. TIPO C (CASOS CLÍNICOS CON POSIBILIDAD DE IMAGEN):
+       - Redacta "Viñetas Clínicas" realistas.
+       - Si el caso clínico se beneficiaría de una imagen (ej: Ecografía, Mamografía, Histología), 
+         redacta el enunciado asumiendo que el alumno estará viendo una imagen adjunta.
+         Ejemplo: "Paciente de 30 años... (clínica)... Se realiza ecografía transvaginal obteniendo la siguiente imagen (ver abajo). ¿Cuál es el diagnóstico?"
+       - OJO: No describas excesivamente la imagen si la idea es que el alumno la interprete, pero da contexto clínico (FUM, Beta-HCG, dolor).
        
-       Estructura OBLIGATORIA para Tipo C:
-       - PERFIL: Edad, Paridad (GnPn), Antecedentes relevantes (fumadora, cirugías, FUM).
-       - ENFERMEDAD ACTUAL: Motivo de consulta, cronología, tipo de dolor/sangrado.
-       - EXPLORACIÓN: Constantes vitales (TA, FC, Tª -> CRUCIAL para decidir estabilidad), hallazgos a la especuloscopia y tacto bimanual.
-       - PRUEBAS: Descripción técnica de la imagen ecográfica (ej: "imagen en vidrio esmerilado", "línea endometrial de 14mm", "saco gestacional sin embrión", "líquido libre en Douglas") o analítica (Beta-HCG, Hb).
-       
-       LA PREGUNTA debe requerir INTEGRAR estos datos para decidir la ACTITUD o el DIAGNÓSTICO más probable entre distractores plausibles.
-       Ejemplo de estilo: "Ante la inestabilidad hemodinámica y el líquido libre, ¿cuál es la actitud inmediata?"
+       Estructura OBLIGATORIA Tipo C:
+       - PERFIL: Edad, Paridad, Antecedentes.
+       - CLÍNICA: Motivo consulta, constantes (TA, FC).
+       - PRUEBAS: Menciona que se realiza la prueba de imagen pertinente.
+       - PREGUNTA: Diagnóstico, Actitud o Tratamiento.
     
     FORMATO DE SALIDA (JSON):
     {
         "questions": [
             {
-                "type": "Tipo A" o "Tipo B" o "Tipo C",
-                "question": "Enunciado completo...",
-                "options": ["Opción A", "Opción B", "Opción C", "Opción D"],
+                "type": "Tipo A/B/C",
+                "question": "Enunciado...",
+                "options": ["a) ...", "b) ...", "c) ...", "d) ..."],
                 "answer_index": 0,
-                "justification": "Justificación clínica detallada..."
+                "justification": "..."
             }
         ]
     }
@@ -96,7 +114,7 @@ def call_openai_generator(api_key, text, na, nb, nc, topic):
     - {nb} preguntas Tipo B.
     - {nc} preguntas Tipo C (Casos Clínicos Complejos).
     
-    TEXTO BASE DEL TEMA (Diapositivas/Manual):
+    TEXTO BASE:
     {text[:25000]}...
     """
 
@@ -115,7 +133,7 @@ def call_openai_generator(api_key, text, na, nb, nc, topic):
         return []
 
 def create_exam_docx(questions):
-    """Genera el Word final con formato oficial"""
+    """Genera el Word final incluyendo IMÁGENES si existen"""
     doc = Document()
     
     # Cabecera
@@ -164,9 +182,21 @@ def create_exam_docx(questions):
         run = p.add_run(f"{i+1}. {q['question']}")
         run.bold = True
         
+        # --- INSERCIÓN DE IMAGEN ---
+        if 'image_data' in q and q['image_data'] is not None:
+            try:
+                # Convertir bytes a stream
+                image_stream = io.BytesIO(q['image_data'])
+                doc.add_picture(image_stream, width=Inches(3.5)) # Ancho estándar
+                # Centrar imagen (truco para python-docx)
+                last_p = doc.paragraphs[-1] 
+                last_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except:
+                pass # Si la imagen falla, seguimos
+        # ---------------------------
+
         letters = ["a)", "b)", "c)", "d)"]
         for j, opt in enumerate(q['options']):
-            # Limpieza básica por si la IA pone letras dobles
             clean_opt = opt
             if opt.strip().lower().startswith("a)"): clean_opt = opt[2:].strip()
             elif opt.strip().lower().startswith("b)"): clean_opt = opt[2:].strip()
@@ -184,30 +214,35 @@ with st.sidebar:
     st.title("Generador USAL - Pro")
     api_key = st.text_input("Clave API OpenAI", type="password")
     st.markdown("---")
-    st.info("💡 **Novedad:** Ahora los casos clínicos (Tipo C) incluyen constantes vitales y datos de exploración complejos.")
+    st.success("📸 **Soporte de Imágenes Activo:** Ahora puedes extraer ecografías de los PDF y pegarlas en las preguntas.")
 
-# --- PESTAÑAS (FLUJO DE TRABAJO) ---
+# --- PESTAÑAS ---
 tab_upload, tab_review, tab_exam = st.tabs([
-    "1️⃣ Subir Material Docente", 
-    "2️⃣ Generar y Editar Preguntas", 
+    "1️⃣ Subir Material", 
+    "2️⃣ Generar y Editar (con Imágenes)", 
     "3️⃣ Crear Examen Final"
 ])
 
 # --- TAB 1: SUBIDA ---
 with tab_upload:
-    st.header("Paso 1: Carga de Presentaciones/PDFs")
-    uploaded = st.file_uploader("Sube los archivos (Max 35)", type="pdf", accept_multiple_files=True)
+    st.header("Paso 1: Carga de Archivos")
+    uploaded = st.file_uploader("Sube PDFs/PPTs (Max 35)", type="pdf", accept_multiple_files=True)
     
     if uploaded:
         new_files = [f for f in uploaded if f.name not in st.session_state['files_processed_names']]
         
         if new_files:
-            st.info("⏳ Procesando texto de los nuevos archivos...")
+            st.info("⏳ Procesando texto e imágenes...")
             bar = st.progress(0)
             for i, f in enumerate(new_files):
-                text, status = extract_text_robust(f)
+                # Extraemos texto e imágenes
+                text, imgs, status = extract_content_robust(f)
+                
                 if text:
-                    st.session_state['files_content'][f.name] = text
+                    st.session_state['files_data'][f.name] = {
+                        'text': text,
+                        'images': imgs # Lista de bytes
+                    }
                     st.session_state['files_processed_names'].append(f.name)
                 else:
                     st.error(f"Error en {f.name}: {status}")
@@ -215,141 +250,151 @@ with tab_upload:
             st.success("Procesamiento completado.")
             st.rerun()
             
-    validos = list(st.session_state['files_content'].keys())
+    validos = list(st.session_state['files_data'].keys())
     if validos:
-        st.success(f"✅ {len(validos)} temas cargados correctamente.")
-        with st.expander("Ver lista de archivos cargados"):
+        st.success(f"✅ {len(validos)} temas cargados.")
+        with st.expander("Detalles de archivos cargados"):
             for v in validos:
-                st.text(f"- {v}")
+                n_imgs = len(st.session_state['files_data'][v]['images'])
+                st.write(f"- **{v}**: {n_imgs} imágenes detectadas.")
 
 # --- TAB 2: GENERAR Y EDITAR ---
 with tab_review:
-    st.header("Paso 2: Generación y Edición Docente")
+    st.header("Paso 2: Generación, Imágenes y Edición")
     
-    temas_list = list(st.session_state['files_content'].keys())
+    temas_list = list(st.session_state['files_data'].keys())
     
     if not temas_list:
-        st.warning("Por favor, sube archivos en la Pestaña 1 primero.")
+        st.warning("Sube archivos primero.")
     else:
-        tema_actual = st.selectbox("Selecciona el tema para trabajar:", temas_list)
+        tema_actual = st.selectbox("Selecciona Tema:", temas_list)
         
         if tema_actual:
             st.divider()
             
-            # CONFIGURACIÓN
-            st.subheader(f"Configuración para: {tema_actual}")
-            
-            # --- AQUÍ ESTABA EL ERROR ANTERIORMENTE, YA CORREGIDO ---
+            # CONFIG
             c1, c2, c3 = st.columns(3)
-            na = c1.number_input("Nº Preguntas Tipo A (Directas)", 0, 20, 2)
-            nb = c2.number_input("Nº Preguntas Tipo B (Integradas)", 0, 20, 2)
-            nc = c3.number_input("Nº Preguntas Tipo C (Casos Clínicos)", 0, 20, 2)
-            # ---------------------------------------------------------
+            na = c1.number_input("Tipo A", 0, 20, 2)
+            nb = c2.number_input("Tipo B", 0, 20, 2)
+            nc = c3.number_input("Tipo C (Casos)", 0, 20, 2)
             
             col_btn, col_info = st.columns([1, 2])
             btn_generate = col_btn.button(f"✨ Generar Preguntas", type="primary")
             
             if btn_generate:
                 if not api_key:
-                    st.error("⚠️ Falta la API Key en la barra lateral.")
+                    st.error("Falta API Key.")
                 else:
-                    with st.spinner("🧠 Analizando caso clínico y redactando viñetas..."):
-                        text_src = st.session_state['files_content'][tema_actual]
+                    with st.spinner("Analizando texto y redactando casos clínicos..."):
+                        text_src = st.session_state['files_data'][tema_actual]['text']
                         qs = call_openai_generator(api_key, text_src, na, nb, nc, tema_actual)
                         if qs:
                             st.session_state['questions_db'][tema_actual] = qs
                             st.success(f"¡Generadas {len(qs)} preguntas!")
                         else:
-                            st.error("No se pudieron generar preguntas. Revisa el archivo o la API Key.")
+                            st.error("Error al generar.")
 
-            # EDICIÓN
+            # EDITOR
             if tema_actual in st.session_state['questions_db']:
                 st.markdown("---")
-                st.subheader(f"📝 Editor de Preguntas: {tema_actual}")
+                st.subheader(f"📝 Editor: {tema_actual}")
+                
+                # Imágenes disponibles del tema
+                available_imgs = st.session_state['files_data'][tema_actual]['images']
                 
                 qs_editor = st.session_state['questions_db'][tema_actual]
                 
                 with st.form(key=f"form_{tema_actual}"):
                     updated_qs = []
                     for i, q in enumerate(qs_editor):
-                        # Visualización clara del tipo
+                        # Título y Tipo
                         tipo_color = "blue" if "Tipo C" in q.get('type', '') else "black"
-                        st.markdown(f"<h4 style='color:{tipo_color}'>Pregunta {i+1} - {q.get('type', 'General')}</h4>", unsafe_allow_html=True)
+                        st.markdown(f"<h4 style='color:{tipo_color}'>P{i+1} - {q.get('type', 'General')}</h4>", unsafe_allow_html=True)
                         
-                        # Enunciado grande para casos clínicos
-                        height_area = 150 if "Tipo C" in q.get('type', '') else 80
-                        new_q_text = st.text_area("Enunciado:", value=q['question'], key=f"q_{tema_actual}_{i}", height=height_area)
+                        # ENUNCIADO
+                        new_q_text = st.text_area("Enunciado:", value=q['question'], key=f"q_{tema_actual}_{i}", height=100)
                         
-                        # Opciones
+                        # --- SELECTOR DE IMAGEN ---
+                        img_data_selected = q.get('image_data', None) # Recuperar si ya tenía una
+                        
+                        if available_imgs:
+                            with st.expander(f"📸 Adjuntar Imagen (Disponibles: {len(available_imgs)})"):
+                                # Mostramos galería pequeña
+                                col_imgs = st.columns(5)
+                                for idx_img, img_bytes in enumerate(available_imgs[:10]): # Limitamos preview a 10 por velocidad
+                                    try:
+                                        with col_imgs[idx_img % 5]:
+                                            st.image(img_bytes, use_container_width=True)
+                                            st.caption(f"Img {idx_img}")
+                                    except: pass
+                                
+                                # Selector
+                                prev_idx = q.get('image_index_local', -1)
+                                sel_idx = st.number_input(f"Escribe el Nº de Img para asociar a P{i+1} (-1 = Ninguna)", 
+                                                        min_value=-1, max_value=len(available_imgs)-1, value=prev_idx, key=f"img_sel_{tema_actual}_{i}")
+                                
+                                if sel_idx >= 0:
+                                    img_data_selected = available_imgs[sel_idx]
+                                    st.success(f"Imagen {sel_idx} asociada.")
+                                else:
+                                    img_data_selected = None
+                        # --------------------------
+
+                        # OPCIONES
+                        c_ops1, c_ops2 = st.columns(2)
                         opts = q['options']
                         while len(opts) < 4: opts.append("") 
                         
-                        col_ops1, col_ops2 = st.columns(2)
-                        o0 = col_ops1.text_input("a)", value=opts[0], key=f"o0_{tema_actual}_{i}")
-                        o1 = col_ops2.text_input("b)", value=opts[1], key=f"o1_{tema_actual}_{i}")
-                        o2 = col_ops1.text_input("c)", value=opts[2], key=f"o2_{tema_actual}_{i}")
-                        o3 = col_ops2.text_input("d)", value=opts[3], key=f"o3_{tema_actual}_{i}")
+                        o0 = c_ops1.text_input("a)", value=opts[0], key=f"o0_{tema_actual}_{i}")
+                        o1 = c_ops2.text_input("b)", value=opts[1], key=f"o1_{tema_actual}_{i}")
+                        o2 = c_ops1.text_input("c)", value=opts[2], key=f"o2_{tema_actual}_{i}")
+                        o3 = c_ops2.text_input("d)", value=opts[3], key=f"o3_{tema_actual}_{i}")
                         
-                        # Respuesta y Justificación
+                        # RESPUESTA
                         c_ans, c_just = st.columns([1, 3])
-                        idx_ans = c_ans.selectbox("Opción Correcta:", [0,1,2,3], index=q['answer_index'], 
+                        idx_ans = c_ans.selectbox("Correcta:", [0,1,2,3], index=q['answer_index'], 
                                                format_func=lambda x: "a,b,c,d".split(',')[x], key=f"ans_{tema_actual}_{i}")
-                        new_just = c_just.text_input("Justificación (Interna):", value=q.get('justification', ''), key=f"just_{tema_actual}_{i}")
+                        new_just = c_just.text_input("Justificación:", value=q.get('justification', ''), key=f"just_{tema_actual}_{i}")
                         
                         updated_qs.append({
                             "type": q.get('type'),
                             "question": new_q_text,
                             "options": [o0, o1, o2, o3],
                             "answer_index": idx_ans,
-                            "justification": new_just
+                            "justification": new_just,
+                            "image_data": img_data_selected, # Guardamos los bytes de la imagen
+                            "image_index_local": sel_idx if 'sel_idx' in locals() else -1
                         })
                         st.write("---")
                     
-                    if st.form_submit_button("💾 Guardar Cambios y Refrescar"):
+                    if st.form_submit_button("💾 Guardar Cambios"):
                         st.session_state['questions_db'][tema_actual] = updated_qs
-                        st.success("Preguntas actualizadas correctamente.")
+                        st.success("Preguntas e Imágenes guardadas.")
 
-# --- TAB 3: EXAMEN FINAL ---
+# --- TAB 3: EXAMEN ---
 with tab_exam:
-    st.header("Paso 3: Generar Documento de Examen")
+    st.header("Paso 3: Examen Final")
     
-    all_questions = []
-    temas_incluidos = []
-    
+    all_qs = []
     for t, qs in st.session_state['questions_db'].items():
-        all_questions.extend(qs)
-        temas_incluidos.append(t)
+        all_qs.extend(qs)
     
-    total_disponibles = len(all_questions)
-    
-    if total_disponibles == 0:
-        st.warning("No hay preguntas listas. Ve al Paso 2.")
+    if not all_qs:
+        st.warning("No hay preguntas.")
     else:
-        st.write(f"Tienes un banco de **{total_disponibles} preguntas** provenientes de:")
-        st.caption(", ".join(temas_incluidos))
+        st.write(f"Total: **{len(all_qs)} preguntas**.")
+        num = st.number_input("Nº Preguntas:", 1, 100, 40)
         
-        num_preguntas = st.number_input("Número de preguntas para el examen:", min_value=1, max_value=100, value=40)
-        
-        if st.button("📄 Descargar Examen (.docx)"):
-            # Selección aleatoria si hay más de las necesarias
-            if len(all_questions) > num_preguntas:
-                seleccionadas = random.sample(all_questions, num_preguntas)
+        if st.button("📄 Generar Word (con Imágenes)"):
+            if len(all_qs) > num:
+                sel = random.sample(all_qs, num)
             else:
-                seleccionadas = all_questions
-                st.warning(f"Solo había {len(all_questions)} preguntas, se han puesto todas.")
+                sel = all_qs
             
-            # Mezclar orden
-            random.shuffle(seleccionadas)
-            
-            # Generar Word
-            doc = create_exam_docx(seleccionadas)
+            random.shuffle(sel)
+            doc = create_exam_docx(sel)
             bio = io.BytesIO()
             doc.save(bio)
             
             st.balloons()
-            st.download_button(
-                label="⬇️ Descargar Archivo Word",
-                data=bio.getvalue(),
-                file_name="Examen_Ginecologia_Final.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("⬇️ Descargar Examen", bio.getvalue(), "Examen_Ginecologia_Final.docx")
