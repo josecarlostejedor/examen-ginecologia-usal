@@ -34,7 +34,7 @@ if 'files_processed_names' not in st.session_state:
 if 'questions_db' not in st.session_state:
     st.session_state['questions_db'] = {}
 if 'final_exam_questions' not in st.session_state:
-    st.session_state['final_exam_questions'] = [] # Para guardar el modelo generado y hacer el solucionario
+    st.session_state['final_exam_questions'] = []
 
 # --- FUNCIONES DE LÓGICA ---
 
@@ -99,6 +99,7 @@ def call_openai_generator(api_key, text, na, nb, nc, topic):
         return []
 
 def create_header(doc, is_exam=False):
+    # Cabecera Institucional
     table = doc.add_table(1, 2)
     table.autofit = False
     table.columns[0].width = Inches(4)
@@ -116,14 +117,38 @@ def create_header(doc, is_exam=False):
     doc.add_paragraph()
 
     if is_exam:
+        # Datos Alumno
         p = doc.add_paragraph()
-        p.add_run("CURSO 3º ______ APELLIDOS ___________________________________ NOMBRE ______________________ DNI ___________").font.size = Pt(10)
-        doc.add_heading("EXAMEN DE GINECOLOGÍA", 0).alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run("CURSO _3º____\n").bold = True
+        p.add_run("APELLIDOS _________________________________________________________________________\n")
+        p.add_run("NOMBRE __________________________________________ DNI _______________________")
+        doc.add_paragraph("")
+
+        # Título
+        tit = doc.add_heading("Ginecología", 0)
+        tit.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        t = doc.add_table(1, 1); t.style = 'Table Grid'
-        msg = ("Lea atentamente. 50 min. 40 preguntas. Acierto +1. Fallo -0.25. Aprobar 5/10.")
-        t.cell(0,0).text = msg
-        doc.add_paragraph()
+        # Cuadro de Instrucciones (TEXTO COMPLETO ACTUALIZADO)
+        t = doc.add_table(1, 1)
+        t.style = 'Table Grid'
+        
+        full_text = (
+            "Lea atentamente cada cuestión antes de responder.\n"
+            "Dispone de 50 minutos para responder a 40 preguntas tipo test "
+            "con 4 opciones, de las que sólo una es verdadera.\n"
+            "Cada pregunta correcta suma 1 punto. Las respuestas incorrectas "
+            "restan 0.25 puntos. Las preguntas no contestadas no suman ni "
+            "restan puntuación.\n"
+            "Para aprobar el examen será necesario obtener como mínimo una "
+            "puntuación final de 5 puntos.\n"
+            "La valoración final en las calificaciones será sobre 10 puntos."
+        )
+        
+        cell = t.cell(0,0)
+        p_instr = cell.paragraphs[0]
+        run_instr = p_instr.add_run(full_text)
+        run_instr.font.size = Pt(10) # Tamaño de letra legible
+        doc.add_paragraph("")
 
 def add_image_to_doc(doc, q):
     if 'image_data' in q and q['image_data'] is not None:
@@ -162,7 +187,7 @@ def create_solution_docx(questions):
         p.add_run(q['question'])
         add_image_to_doc(doc, q)
         
-        # Opciones con la correcta marcada
+        # Opciones
         letters = ["a)", "b)", "c)", "d)"]
         for j, opt in enumerate(q['options']):
             clean = opt.split(') ', 1)[-1] if ')' in opt[:4] else opt
@@ -225,9 +250,10 @@ with tab2:
     if tema_sel:
         st.divider()
         c1, c2, c3, c4 = st.columns([1,1,1,2])
-        na = c1.number_input("A (Directas)", 0, 10, 2)
-        nb = c2.number_input("B (Integradas)", 0, 10, 2)
-        nc = c3.number_input("C (Casos)", 0, 10, 1)
+        # MODIFICADO: AUMENTADO LÍMITE A 40
+        na = c1.number_input("A (Directas)", 0, 40, 2)
+        nb = c2.number_input("B (Integradas)", 0, 40, 2)
+        nc = c3.number_input("C (Casos)", 0, 40, 1)
         
         if c4.button("✨ Generar Preguntas", type="primary"):
             if not api_key: st.error("Falta API Key"); st.stop()
@@ -246,10 +272,8 @@ with tab2:
                     st.markdown(f"<h4 style='color:{color}'>P{i+1} - {q.get('type')}</h4>", unsafe_allow_html=True)
                     new_q = st.text_area("Enunciado", q['question'], key=f"q_{i}", height=100)
                     
-                    # --- GESTIÓN DE IMÁGENES (NUEVO) ---
+                    # --- GESTIÓN DE IMÁGENES ---
                     col_img_prev, col_img_ctrl = st.columns([1, 2])
-                    
-                    # Determinar imagen actual
                     current_img_data = q.get('image_data', None)
                     
                     with col_img_prev:
@@ -275,7 +299,14 @@ with tab2:
                             if uploaded_img:
                                 final_img_data = uploaded_img.getvalue()
                                 st.image(final_img_data, width=100)
-                    # -----------------------------------
+                        
+                        # Mantener imagen anterior si no se selecciona una nueva pero ya había una
+                        if source != "Ninguna" and final_img_data is None and current_img_data is not None:
+                             # Lógica de persistencia simple: Si no cambias nada, se pierde al refrescar si no lo reasignamos
+                             # PERO: El usuario debe volver a seleccionar si quiere mantenerla en modo edición
+                             pass 
+                        if source == "Ninguna": final_img_data = None
+                    # ---------------------------
 
                     c_ops1, c_ops2 = st.columns(2)
                     opts = q['options']; 
@@ -289,7 +320,8 @@ with tab2:
                     
                     updated_qs.append({
                         **q, 'question': new_q, 'options': [o0,o1,o2,o3], 'answer_index': idx, 
-                        'justification': just, 'image_data': final_img_data
+                        'justification': just, 'image_data': final_img_data if final_img_data else current_img_data
+                        # Nota: mantenemos la imagen si el usuario no tocó nada o si subió nueva
                     })
                     st.divider()
                 
@@ -324,7 +356,7 @@ with tab3:
     else:
         st.info("Pulsa el botón para generar un modelo.")
 
-# --- TAB 4: SOLUCIONARIO (NUEVO) ---
+# --- TAB 4: SOLUCIONARIO ---
 with tab4:
     st.header("Solucionario y Respuestas")
     
