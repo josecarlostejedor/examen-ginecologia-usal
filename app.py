@@ -238,6 +238,118 @@ with tab_review:
             
             # CONFIGURACIÓN
             st.subheader(f"Configuración para: {tema_actual}")
+            
+            # --- AQUÍ ESTABA EL ERROR ANTERIORMENTE, YA CORREGIDO ---
             c1, c2, c3 = st.columns(3)
             na = c1.number_input("Nº Preguntas Tipo A (Directas)", 0, 20, 2)
-            nb = c2.
+            nb = c2.number_input("Nº Preguntas Tipo B (Integradas)", 0, 20, 2)
+            nc = c3.number_input("Nº Preguntas Tipo C (Casos Clínicos)", 0, 20, 2)
+            # ---------------------------------------------------------
+            
+            col_btn, col_info = st.columns([1, 2])
+            btn_generate = col_btn.button(f"✨ Generar Preguntas", type="primary")
+            
+            if btn_generate:
+                if not api_key:
+                    st.error("⚠️ Falta la API Key en la barra lateral.")
+                else:
+                    with st.spinner("🧠 Analizando caso clínico y redactando viñetas..."):
+                        text_src = st.session_state['files_content'][tema_actual]
+                        qs = call_openai_generator(api_key, text_src, na, nb, nc, tema_actual)
+                        if qs:
+                            st.session_state['questions_db'][tema_actual] = qs
+                            st.success(f"¡Generadas {len(qs)} preguntas!")
+                        else:
+                            st.error("No se pudieron generar preguntas. Revisa el archivo o la API Key.")
+
+            # EDICIÓN
+            if tema_actual in st.session_state['questions_db']:
+                st.markdown("---")
+                st.subheader(f"📝 Editor de Preguntas: {tema_actual}")
+                
+                qs_editor = st.session_state['questions_db'][tema_actual]
+                
+                with st.form(key=f"form_{tema_actual}"):
+                    updated_qs = []
+                    for i, q in enumerate(qs_editor):
+                        # Visualización clara del tipo
+                        tipo_color = "blue" if "Tipo C" in q.get('type', '') else "black"
+                        st.markdown(f"<h4 style='color:{tipo_color}'>Pregunta {i+1} - {q.get('type', 'General')}</h4>", unsafe_allow_html=True)
+                        
+                        # Enunciado grande para casos clínicos
+                        height_area = 150 if "Tipo C" in q.get('type', '') else 80
+                        new_q_text = st.text_area("Enunciado:", value=q['question'], key=f"q_{tema_actual}_{i}", height=height_area)
+                        
+                        # Opciones
+                        opts = q['options']
+                        while len(opts) < 4: opts.append("") 
+                        
+                        col_ops1, col_ops2 = st.columns(2)
+                        o0 = col_ops1.text_input("a)", value=opts[0], key=f"o0_{tema_actual}_{i}")
+                        o1 = col_ops2.text_input("b)", value=opts[1], key=f"o1_{tema_actual}_{i}")
+                        o2 = col_ops1.text_input("c)", value=opts[2], key=f"o2_{tema_actual}_{i}")
+                        o3 = col_ops2.text_input("d)", value=opts[3], key=f"o3_{tema_actual}_{i}")
+                        
+                        # Respuesta y Justificación
+                        c_ans, c_just = st.columns([1, 3])
+                        idx_ans = c_ans.selectbox("Opción Correcta:", [0,1,2,3], index=q['answer_index'], 
+                                               format_func=lambda x: "a,b,c,d".split(',')[x], key=f"ans_{tema_actual}_{i}")
+                        new_just = c_just.text_input("Justificación (Interna):", value=q.get('justification', ''), key=f"just_{tema_actual}_{i}")
+                        
+                        updated_qs.append({
+                            "type": q.get('type'),
+                            "question": new_q_text,
+                            "options": [o0, o1, o2, o3],
+                            "answer_index": idx_ans,
+                            "justification": new_just
+                        })
+                        st.write("---")
+                    
+                    if st.form_submit_button("💾 Guardar Cambios y Refrescar"):
+                        st.session_state['questions_db'][tema_actual] = updated_qs
+                        st.success("Preguntas actualizadas correctamente.")
+
+# --- TAB 3: EXAMEN FINAL ---
+with tab_exam:
+    st.header("Paso 3: Generar Documento de Examen")
+    
+    all_questions = []
+    temas_incluidos = []
+    
+    for t, qs in st.session_state['questions_db'].items():
+        all_questions.extend(qs)
+        temas_incluidos.append(t)
+    
+    total_disponibles = len(all_questions)
+    
+    if total_disponibles == 0:
+        st.warning("No hay preguntas listas. Ve al Paso 2.")
+    else:
+        st.write(f"Tienes un banco de **{total_disponibles} preguntas** provenientes de:")
+        st.caption(", ".join(temas_incluidos))
+        
+        num_preguntas = st.number_input("Número de preguntas para el examen:", min_value=1, max_value=100, value=40)
+        
+        if st.button("📄 Descargar Examen (.docx)"):
+            # Selección aleatoria si hay más de las necesarias
+            if len(all_questions) > num_preguntas:
+                seleccionadas = random.sample(all_questions, num_preguntas)
+            else:
+                seleccionadas = all_questions
+                st.warning(f"Solo había {len(all_questions)} preguntas, se han puesto todas.")
+            
+            # Mezclar orden
+            random.shuffle(seleccionadas)
+            
+            # Generar Word
+            doc = create_exam_docx(seleccionadas)
+            bio = io.BytesIO()
+            doc.save(bio)
+            
+            st.balloons()
+            st.download_button(
+                label="⬇️ Descargar Archivo Word",
+                data=bio.getvalue(),
+                file_name="Examen_Ginecologia_Final.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
