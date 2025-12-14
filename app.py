@@ -10,7 +10,7 @@ import random
 from PIL import Image
 
 # --- CONFIGURACIÓN INICIAL ---
-st.set_page_config(page_title="Generador Exámenes USAL - Suite Completa", layout="wide")
+st.set_page_config(page_title="Generador Exámenes USAL - Casos Clínicos Reales", layout="wide")
 
 st.markdown("""
     <style>
@@ -63,29 +63,55 @@ def extract_content_robust(file):
 def call_openai_generator(api_key, text, na, nb, nc, topic):
     client = openai.OpenAI(api_key=api_key)
     
+    # --- PROMPT DE ALTA FIDELIDAD CLÍNICA ---
     system_prompt = """
-    Eres Catedrático de Obstetricia y Ginecología. Genera preguntas para 4º de Medicina.
-    INSTRUCCIONES:
-    1. TIPO A (Directas), TIPO B (Integradas), TIPO C (Casos Clínicos).
-    2. TIPO C: Si aplica, redacta asumiendo que hay una imagen adjunta (ej: "Ver imagen ecográfica abajo").
-       Estructura Tipo C: Perfil paciente + Clínica detallada (constantes) + Pruebas.
-    3. JUSTIFICACIÓN: Explica claramente por qué la correcta es la correcta y por qué fallan las otras.
+    Eres un Catedrático de Obstetricia y Ginecología con enfoque en medicina basada en la evidencia y práctica clínica real.
+    
+    TU OBJETIVO:
+    Generar preguntas de examen que evalúen la capacidad de integración clínica del alumno, no solo su memoria.
+    
+    INSTRUCCIONES POR TIPO:
+    
+    1. TIPO A (Conocimiento): Definiciones precisas, anatomía, clasificaciones vigentes.
+    2. TIPO B (Integración): Fisiopatología, farmacología aplicada, correlación básico-clínica.
+    
+    3. TIPO C (CASO CLÍNICO REALISTA - "VIÑETA CLÍNICA"):
+       Debes construir una historia clínica completa. ESTÁ PROHIBIDO ser escueto.
+       Estructura OBLIGATORIA del enunciado para Tipo C:
+       
+       A) ANAMNESIS Y CONTEXTO:
+          - Perfil: Edad, IMC (importante en ginecología), Profesión o Estilo de vida (sedentarismo, estrés).
+          - Antecedentes Gineco-Obstétricos (AGO): Fórmula menstrual, Paridad (GnPn), lactancia, uso de anticonceptivos.
+          - Antecedentes Personales/Familiares: Tabaco/Alcohol, cirugías previas, antecedentes oncológicos familiares (BRCA, Lynch), comorbilidades (HTA, Diabetes, Trombofilias).
+       
+       B) ENFERMEDAD ACTUAL:
+          - Motivo de consulta detallado, tiempo de evolución, características del dolor/sangrado.
+       
+       C) EXPLORACIÓN FÍSICA:
+          - Constantes vitales (TA, FC, Tª -> Fundamental para decidir urgencia).
+          - Inspección general, palpación abdominal, especuloscopia y tacto bimanual.
+       
+       D) PRUEBAS COMPLEMENTARIAS (Datos concretos):
+          - Analítica: Aporta VALORES (ej: Hb 9.8 g/dL, Leucos 14.000, Beta-HCG 1500, CA-125 60). No digas "analítica normal".
+          - Imagen: Describe la ecografía con lenguaje técnico (ecogenicidad, vascularización Doppler, sombra acústica, tamaño exacto en mm, líquido en Douglas).
+       
+       La pregunta debe requerir INTEGRAR todos estos factores (antecedentes + clínica + laboratorio + imagen) para tomar una decisión.
     
     FORMATO JSON:
     {
         "questions": [
             {
                 "type": "Tipo A/B/C",
-                "question": "Enunciado...",
+                "question": "Enunciado largo y detallado...",
                 "options": ["a) ...", "b) ...", "c) ...", "d) ..."],
                 "answer_index": 0,
-                "justification": "Explicación detallada..."
+                "justification": "Explicación basada en las guías clínicas..."
             }
         ]
     }
     """
     
-    user_prompt = f"Tema: {topic}. Genera: {na} Tipo A, {nb} Tipo B, {nc} Tipo C.\nTEXTO BASE:\n{text[:25000]}..."
+    user_prompt = f"Tema: {topic}. Genera: {na} Tipo A, {nb} Tipo B, {nc} Tipo C (Casos Clínicos muy detallados).\nTEXTO BASE:\n{text[:25000]}..."
 
     try:
         response = client.chat.completions.create(
@@ -99,7 +125,7 @@ def call_openai_generator(api_key, text, na, nb, nc, topic):
         return []
 
 def create_header(doc, is_exam=False):
-    # Cabecera Institucional
+    # Cabecera
     table = doc.add_table(1, 2)
     table.autofit = False
     table.columns[0].width = Inches(4)
@@ -128,7 +154,7 @@ def create_header(doc, is_exam=False):
         tit = doc.add_heading("Ginecología", 0)
         tit.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Cuadro de Instrucciones (TEXTO COMPLETO ACTUALIZADO)
+        # Cuadro de Instrucciones (TEXTO COMPLETO SOLICITADO)
         t = doc.add_table(1, 1)
         t.style = 'Table Grid'
         
@@ -147,7 +173,7 @@ def create_header(doc, is_exam=False):
         cell = t.cell(0,0)
         p_instr = cell.paragraphs[0]
         run_instr = p_instr.add_run(full_text)
-        run_instr.font.size = Pt(10) # Tamaño de letra legible
+        run_instr.font.size = Pt(10)
         doc.add_paragraph("")
 
 def add_image_to_doc(doc, q):
@@ -250,14 +276,14 @@ with tab2:
     if tema_sel:
         st.divider()
         c1, c2, c3, c4 = st.columns([1,1,1,2])
-        # MODIFICADO: AUMENTADO LÍMITE A 40
+        # Límites aumentados a 40
         na = c1.number_input("A (Directas)", 0, 40, 2)
         nb = c2.number_input("B (Integradas)", 0, 40, 2)
         nc = c3.number_input("C (Casos)", 0, 40, 1)
         
         if c4.button("✨ Generar Preguntas", type="primary"):
             if not api_key: st.error("Falta API Key"); st.stop()
-            with st.spinner("Generando..."):
+            with st.spinner("Generando casos clínicos detallados..."):
                 qs = call_openai_generator(api_key, st.session_state['files_data'][tema_sel]['text'], na, nb, nc, tema_sel)
                 if qs: st.session_state['questions_db'][tema_sel] = qs; st.success("¡Hecho!")
 
@@ -270,7 +296,7 @@ with tab2:
                 for i, q in enumerate(qs):
                     color = "blue" if "Tipo C" in q.get('type','') else "black"
                     st.markdown(f"<h4 style='color:{color}'>P{i+1} - {q.get('type')}</h4>", unsafe_allow_html=True)
-                    new_q = st.text_area("Enunciado", q['question'], key=f"q_{i}", height=100)
+                    new_q = st.text_area("Enunciado", q['question'], key=f"q_{i}", height=120)
                     
                     # --- GESTIÓN DE IMÁGENES ---
                     col_img_prev, col_img_ctrl = st.columns([1, 2])
@@ -293,17 +319,13 @@ with tab2:
                                 st.image(final_img_data, width=100)
                             else:
                                 st.warning("Este PDF no tiene imágenes.")
-                                
                         elif source == "Subir Archivo":
                             uploaded_img = st.file_uploader("Sube tu imagen (PNG/JPG)", type=['png','jpg','jpeg'], key=f"upl_{i}")
                             if uploaded_img:
                                 final_img_data = uploaded_img.getvalue()
                                 st.image(final_img_data, width=100)
                         
-                        # Mantener imagen anterior si no se selecciona una nueva pero ya había una
                         if source != "Ninguna" and final_img_data is None and current_img_data is not None:
-                             # Lógica de persistencia simple: Si no cambias nada, se pierde al refrescar si no lo reasignamos
-                             # PERO: El usuario debe volver a seleccionar si quiere mantenerla en modo edición
                              pass 
                         if source == "Ninguna": final_img_data = None
                     # ---------------------------
@@ -321,7 +343,6 @@ with tab2:
                     updated_qs.append({
                         **q, 'question': new_q, 'options': [o0,o1,o2,o3], 'answer_index': idx, 
                         'justification': just, 'image_data': final_img_data if final_img_data else current_img_data
-                        # Nota: mantenemos la imagen si el usuario no tocó nada o si subió nueva
                     })
                     st.divider()
                 
@@ -359,12 +380,10 @@ with tab3:
 # --- TAB 4: SOLUCIONARIO ---
 with tab4:
     st.header("Solucionario y Respuestas")
-    
     if not st.session_state['final_exam_questions']:
         st.warning("⚠️ Primero debes generar un examen en la Pestaña 3.")
     else:
         qs_exam = st.session_state['final_exam_questions']
-        
         col_down, col_view = st.columns([1, 3])
         
         with col_down:
@@ -387,5 +406,4 @@ with tab4:
                             st.markdown(f"- ✅ **{opt}**")
                         else:
                             st.markdown(f"- {opt}")
-                    
                     st.markdown(f"<div class='justification-box'><b>Justificación:</b><br>{q.get('justification', 'No disponible')}</div>", unsafe_allow_html=True)
