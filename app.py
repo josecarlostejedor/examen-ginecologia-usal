@@ -10,7 +10,7 @@ import random
 from PIL import Image
 
 # --- CONFIGURACIÓN INICIAL ---
-st.set_page_config(page_title="Generador Exámenes USAL - Casos Clínicos Reales", layout="wide")
+st.set_page_config(page_title="Generador Exámenes USAL - Estilo MIR", layout="wide")
 
 st.markdown("""
     <style>
@@ -63,55 +63,43 @@ def extract_content_robust(file):
 def call_openai_generator(api_key, text, na, nb, nc, topic):
     client = openai.OpenAI(api_key=api_key)
     
-    # --- PROMPT DE ALTA FIDELIDAD CLÍNICA ---
+    # --- PROMPT ACTUALIZADO: ESTILO MIR NARRATIVO ---
     system_prompt = """
-    Eres un Catedrático de Obstetricia y Ginecología con enfoque en medicina basada en la evidencia y práctica clínica real.
+    Eres un Catedrático de Obstetricia y Ginecología experto en redacción de preguntas tipo MIR (Médico Interno Residente).
     
-    TU OBJETIVO:
-    Generar preguntas de examen que evalúen la capacidad de integración clínica del alumno, no solo su memoria.
+    OBJETIVO:
+    Generar preguntas de alta calidad técnica, discriminatorias y ajustadas a la realidad clínica.
     
     INSTRUCCIONES POR TIPO:
     
-    1. TIPO A (Conocimiento): Definiciones precisas, anatomía, clasificaciones vigentes.
-    2. TIPO B (Integración): Fisiopatología, farmacología aplicada, correlación básico-clínica.
+    1. TIPO A (Conocimiento Directo): Definiciones, anatomía, clasificaciones o epidemiología. Directas y claras.
     
-    3. TIPO C (CASO CLÍNICO REALISTA - "VIÑETA CLÍNICA"):
-       Debes construir una historia clínica completa. ESTÁ PROHIBIDO ser escueto.
-       Estructura OBLIGATORIA del enunciado para Tipo C:
-       
-       A) ANAMNESIS Y CONTEXTO:
-          - Perfil: Edad, IMC (importante en ginecología), Profesión o Estilo de vida (sedentarismo, estrés).
-          - Antecedentes Gineco-Obstétricos (AGO): Fórmula menstrual, Paridad (GnPn), lactancia, uso de anticonceptivos.
-          - Antecedentes Personales/Familiares: Tabaco/Alcohol, cirugías previas, antecedentes oncológicos familiares (BRCA, Lynch), comorbilidades (HTA, Diabetes, Trombofilias).
-       
-       B) ENFERMEDAD ACTUAL:
-          - Motivo de consulta detallado, tiempo de evolución, características del dolor/sangrado.
-       
-       C) EXPLORACIÓN FÍSICA:
-          - Constantes vitales (TA, FC, Tª -> Fundamental para decidir urgencia).
-          - Inspección general, palpación abdominal, especuloscopia y tacto bimanual.
-       
-       D) PRUEBAS COMPLEMENTARIAS (Datos concretos):
-          - Analítica: Aporta VALORES (ej: Hb 9.8 g/dL, Leucos 14.000, Beta-HCG 1500, CA-125 60). No digas "analítica normal".
-          - Imagen: Describe la ecografía con lenguaje técnico (ecogenicidad, vascularización Doppler, sombra acústica, tamaño exacto en mm, líquido en Douglas).
-       
-       La pregunta debe requerir INTEGRAR todos estos factores (antecedentes + clínica + laboratorio + imagen) para tomar una decisión.
+    2. TIPO B (Conocimiento Integrado): Relaciona fisiopatología con clínica o farmacología.
     
-    FORMATO JSON:
+    3. TIPO C (CASOS CLÍNICOS - ESTILO MIR):
+       - FORMATO: Redacta un ÚNICO PÁRRAFO narrativo y cohesivo. NO uses listas, guiones ni apartados (Nada de "A) Antecedentes...").
+       - CONTENIDO: Integra el perfil de la paciente (edad, paridad), el motivo de consulta, la exploración y las pruebas complementarias de forma fluida.
+       - SELECCIÓN DE DATOS: Incluye SOLO los datos relevantes (positivos y negativos pertinentes) para el diagnóstico o diagnóstico diferencial.
+         * Ejemplo de irrelevante: No menciones el color de ojos o antecedentes sin relación.
+         * Ejemplo de relevante: En una preeclampsia, menciona explícitamente la TA y la proteinuria/plaquetas. En un ectópico, menciona la estabilidad hemodinámica.
+       - REALISMO: Usa valores numéricos concretos (ej: "Beta-HCG de 1500 UI/L", "TA 80/50 mmHg", "Hb 9 g/dL") en lugar de "elevado" o "bajo".
+       - IMÁGENES: Si el caso se beneficia de una imagen (ecografía, mamografía), redáctalo asumiendo que el alumno la ve (ej: "...en la ecografía se observa la siguiente imagen:").
+    
+    FORMATO JSON OBLIGATORIO:
     {
         "questions": [
             {
                 "type": "Tipo A/B/C",
-                "question": "Enunciado largo y detallado...",
+                "question": "Texto de la pregunta...",
                 "options": ["a) ...", "b) ...", "c) ...", "d) ..."],
                 "answer_index": 0,
-                "justification": "Explicación basada en las guías clínicas..."
+                "justification": "Explicación detallada del porqué de la respuesta correcta y el descarte de las otras."
             }
         ]
     }
     """
     
-    user_prompt = f"Tema: {topic}. Genera: {na} Tipo A, {nb} Tipo B, {nc} Tipo C (Casos Clínicos muy detallados).\nTEXTO BASE:\n{text[:25000]}..."
+    user_prompt = f"Tema: {topic}. Genera rigurosamente: {na} preguntas Tipo A, {nb} preguntas Tipo B, {nc} preguntas Tipo C (Estilo MIR).\nTEXTO BASE:\n{text[:25000]}..."
 
     try:
         response = client.chat.completions.create(
@@ -154,7 +142,7 @@ def create_header(doc, is_exam=False):
         tit = doc.add_heading("Ginecología", 0)
         tit.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Cuadro de Instrucciones (TEXTO COMPLETO SOLICITADO)
+        # Cuadro de Instrucciones (TEXTO COMPLETO)
         t = doc.add_table(1, 1)
         t.style = 'Table Grid'
         
@@ -276,14 +264,14 @@ with tab2:
     if tema_sel:
         st.divider()
         c1, c2, c3, c4 = st.columns([1,1,1,2])
-        # Límites aumentados a 40
+        # LÍMITE DE 40 PREGUNTAS
         na = c1.number_input("A (Directas)", 0, 40, 2)
         nb = c2.number_input("B (Integradas)", 0, 40, 2)
         nc = c3.number_input("C (Casos)", 0, 40, 1)
         
         if c4.button("✨ Generar Preguntas", type="primary"):
             if not api_key: st.error("Falta API Key"); st.stop()
-            with st.spinner("Generando casos clínicos detallados..."):
+            with st.spinner("Generando preguntas Estilo MIR..."):
                 qs = call_openai_generator(api_key, st.session_state['files_data'][tema_sel]['text'], na, nb, nc, tema_sel)
                 if qs: st.session_state['questions_db'][tema_sel] = qs; st.success("¡Hecho!")
 
@@ -296,7 +284,7 @@ with tab2:
                 for i, q in enumerate(qs):
                     color = "blue" if "Tipo C" in q.get('type','') else "black"
                     st.markdown(f"<h4 style='color:{color}'>P{i+1} - {q.get('type')}</h4>", unsafe_allow_html=True)
-                    new_q = st.text_area("Enunciado", q['question'], key=f"q_{i}", height=120)
+                    new_q = st.text_area("Enunciado", q['question'], key=f"q_{i}", height=150)
                     
                     # --- GESTIÓN DE IMÁGENES ---
                     col_img_prev, col_img_ctrl = st.columns([1, 2])
@@ -335,75 +323,3 @@ with tab2:
                     while len(opts)<4: opts.append("")
                     o0 = c_ops1.text_input("a)", opts[0], key=f"o0_{i}"); o1 = c_ops2.text_input("b)", opts[1], key=f"o1_{i}")
                     o2 = c_ops1.text_input("c)", opts[2], key=f"o2_{i}"); o3 = c_ops2.text_input("d)", opts[3], key=f"o3_{i}")
-                    
-                    c_ans, c_just = st.columns([1,3])
-                    idx = c_ans.selectbox("Correcta", [0,1,2,3], index=q['answer_index'], format_func=lambda x:"abcd"[x], key=f"ans_{i}")
-                    just = c_just.text_input("Justificación", q.get('justification',''), key=f"jus_{i}")
-                    
-                    updated_qs.append({
-                        **q, 'question': new_q, 'options': [o0,o1,o2,o3], 'answer_index': idx, 
-                        'justification': just, 'image_data': final_img_data if final_img_data else current_img_data
-                    })
-                    st.divider()
-                
-                if st.form_submit_button("💾 Guardar Todo"):
-                    st.session_state['questions_db'][tema_sel] = updated_qs
-                    st.success("Guardado.")
-
-# --- TAB 3: GENERAR EXAMEN ---
-with tab3:
-    st.header("Generar Modelo de Examen")
-    all_qs = [q for qs in st.session_state['questions_db'].values() for q in qs]
-    if not all_qs: st.warning("No hay preguntas."); st.stop()
-    
-    st.write(f"Banco Total: **{len(all_qs)} preguntas**.")
-    num = st.number_input("Cantidad Preguntas:", 1, 100, 40)
-    
-    if st.button("🎲 Generar Nuevo Examen Aleatorio"):
-        if len(all_qs) > num:
-            sel = random.sample(all_qs, num)
-        else:
-            sel = all_qs
-        random.shuffle(sel)
-        st.session_state['final_exam_questions'] = sel
-        st.success("¡Examen generado! Descárgalo abajo o ve a la pestaña 'Solucionario'.")
-
-    if st.session_state['final_exam_questions']:
-        qs_exam = st.session_state['final_exam_questions']
-        doc = create_exam_docx(qs_exam)
-        bio = io.BytesIO()
-        doc.save(bio)
-        st.download_button("📄 Descargar Examen (.docx)", bio.getvalue(), "Examen_Final.docx")
-    else:
-        st.info("Pulsa el botón para generar un modelo.")
-
-# --- TAB 4: SOLUCIONARIO ---
-with tab4:
-    st.header("Solucionario y Respuestas")
-    if not st.session_state['final_exam_questions']:
-        st.warning("⚠️ Primero debes generar un examen en la Pestaña 3.")
-    else:
-        qs_exam = st.session_state['final_exam_questions']
-        col_down, col_view = st.columns([1, 3])
-        
-        with col_down:
-            doc_sol = create_solution_docx(qs_exam)
-            bio_sol = io.BytesIO()
-            doc_sol.save(bio_sol)
-            st.download_button("🔑 Descargar Solucionario (.docx)", bio_sol.getvalue(), "Solucionario_Examen.docx", type="primary")
-            st.metric("Preguntas", len(qs_exam))
-        
-        with col_view:
-            st.subheader("Vista Previa del Solucionario")
-            for i, q in enumerate(qs_exam):
-                with st.expander(f"P{i+1}: {q['question'][:60]}..."):
-                    st.write(f"**Enunciado:** {q['question']}")
-                    if q.get('image_data'): st.image(q['image_data'], width=200)
-                    
-                    st.markdown("**Opciones:**")
-                    for j, opt in enumerate(q['options']):
-                        if j == q['answer_index']:
-                            st.markdown(f"- ✅ **{opt}**")
-                        else:
-                            st.markdown(f"- {opt}")
-                    st.markdown(f"<div class='justification-box'><b>Justificación:</b><br>{q.get('justification', 'No disponible')}</div>", unsafe_allow_html=True)
